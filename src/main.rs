@@ -5,6 +5,7 @@ use serde::Serialize;
 #[derive(Serialize)]
 struct Commit {
     files: HashMap<String, String>,
+    parent: String,
     timestamp: i64,
     message: String,
 }
@@ -16,9 +17,15 @@ fn save_blob(content: String) -> String{
 
 fn save_commit(commit: Commit) {
     let json = serde_json::to_string(&commit).unwrap();
-    fs::write(".mygit/commits/latest", json).unwrap();
+    let commit_hash = digest(&json); 
+    fs::write(format!(".mygit/commits/{}", &commit_hash), json).unwrap();
+    fs::write(".mygit/HEAD", &commit_hash).unwrap();
 }
 
+fn get_last_commit() -> String {
+    let head = fs::read_to_string(".mygit/HEAD").unwrap();
+    return head.trim().to_string();
+}
 fn main() {
     let input = fs::read_to_string("hello.txt").unwrap();
     //read file name
@@ -31,6 +38,7 @@ fn main() {
 
     let commit = Commit {
         files,
+        parent: get_last_commit(),
         timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
         message: "second commit".to_string() 
     };
