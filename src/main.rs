@@ -1,8 +1,8 @@
 use std::{collections::HashMap, fs, hash::Hash, path, time::{Duration, SystemTime, UNIX_EPOCH}};
 use sha256::digest;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Commit {
     files: HashMap<String, String>,
     parent: String,
@@ -26,6 +26,31 @@ fn get_last_commit() -> String {
     let head = fs::read_to_string(".mygit/HEAD").unwrap();
     return head.trim().to_string();
 }
+
+fn log() {
+    let mut current = get_last_commit();
+    
+    while !current.is_empty() {
+        let commit_hash = current.clone();
+        let commit_data = match fs::read_to_string(format!(".mygit/commits/{}", commit_hash)) {
+            Ok(data) => data,
+            Err(_) => break,
+        };
+        let commit: Commit = match serde_json::from_str(&commit_data) {
+            Ok(commit) => commit,
+            Err(_) => break,
+        };
+        
+        println!("commit {}", commit_hash);
+        println!("Message: {}", commit.message);
+        println!("Timestamp: {}", commit.timestamp);
+        println!("Files: {:?}", commit.files.keys());
+        println!();
+        
+        current = commit.parent;
+    }
+}
+
 fn main() {
     let input = fs::read_to_string("hello.txt").unwrap();
     //read file name
@@ -43,5 +68,8 @@ fn main() {
         message: "second commit".to_string() 
     };
 
-    save_commit(commit);
+    // save_commit(commit);
+
+    println!("\n--- Commit History ---");
+    log();
 }
