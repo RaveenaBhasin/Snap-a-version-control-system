@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::{self, File}, hash::Hash, path, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, env::current_exe, fs::{self, File}, hash::Hash, path, time::{Duration, SystemTime, UNIX_EPOCH}};
 use sha256::digest;
 use serde::{Deserialize, Serialize};
 
@@ -22,14 +22,14 @@ struct Commit {
 
 fn save_blob(content: String) -> String{
     let hash = digest(&content);
-    fs::write(format!(".mygit/objects/{}", hash), &content).unwrap();
+    fs::write(format!(".snap/objects/{}", hash), &content).unwrap();
     return hash;
 }
 
 fn save_tree(tree: Tree) -> String {
     let json = serde_json::to_string(&tree).unwrap();
     let tree_hash = digest(&json);
-    fs::write(format!(".mygit/objects/{}", tree_hash), json).unwrap();
+    fs::write(format!(".snap/objects/{}", tree_hash), json).unwrap();
     return tree_hash;   
 }
 
@@ -37,8 +37,8 @@ fn save_tree(tree: Tree) -> String {
 fn save_commit(commit: Commit) {
     let json = serde_json::to_string(&commit).unwrap();
     let commit_hash = digest(&json); 
-    fs::write(format!(".mygit/objects/{}", &commit_hash), json).unwrap();
-    fs::write(".mygit/HEAD", &commit_hash).unwrap();
+    fs::write(format!(".snap/objects/{}", &commit_hash), json).unwrap();
+    fs::write(".snap/HEAD", &commit_hash).unwrap();
 }
 
 fn build_tree(dir: &str) -> String {
@@ -65,7 +65,7 @@ fn build_tree(dir: &str) -> String {
 }
 
 fn get_last_commit() -> String {
-    let head = fs::read_to_string(".mygit/HEAD").unwrap();
+    let head = fs::read_to_string(".snap/HEAD").unwrap();
     return head.trim().to_string();
 }
 
@@ -74,7 +74,7 @@ fn get_last_commit() -> String {
     
 //     while !current.is_empty() {
 //         let commit_hash = current.clone();
-//         let commit_data = match fs::read_to_string(format!(".mygit/objects/{}", commit_hash)) {
+//         let commit_data = match fs::read_to_string(format!(".snap/objects/{}", commit_hash)) {
 //             Ok(data) => data,
 //             Err(_) => break,
 //         };
@@ -118,9 +118,9 @@ fn compare_trees(tree_hash_1: String, tree_hash_2: String) {
 }
 
 fn compare_trees_recursive(tree_hash_1: String, tree_hash_2: String, path_prefix: &str) {
-    let tree_data_1 = fs::read_to_string(format!(".mygit/objects/{}", tree_hash_1)).unwrap();
+    let tree_data_1 = fs::read_to_string(format!(".snap/objects/{}", tree_hash_1)).unwrap();
     let tree_1 : Tree = serde_json::from_str(&tree_data_1).unwrap();
-    let tree_data_2 = fs::read_to_string(format!(".mygit/objects/{}", tree_hash_2)).unwrap();
+    let tree_data_2 = fs::read_to_string(format!(".snap/objects/{}", tree_hash_2)).unwrap();
     let tree_2 : Tree = serde_json::from_str(&tree_data_2).unwrap();
 
     let full_path = |name: &String| -> String {
@@ -215,7 +215,10 @@ fn compare_trees_recursive(tree_hash_1: String, tree_hash_2: String, path_prefix
 
 
 fn main() {
-    fs::create_dir_all(".mygit/objects").unwrap();
+    fs::create_dir_all(".snap/objects").unwrap();
+    if !fs::metadata(".snap/HEAD").is_ok() {
+        fs::write(".snap/HEAD", "").unwrap();
+    }
     
     let tree = build_tree("test_project");
     
@@ -223,7 +226,7 @@ fn main() {
         tree_hash: tree,
         parent: get_last_commit(),
         timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-        message: "Commit with treee changed".to_string() 
+        message: "test 2 changed".to_string() 
     };
     
     save_commit(commit);
@@ -233,11 +236,25 @@ fn main() {
 
 
     let current_commit_hash = get_last_commit();
-    let current_commit_data = fs::read_to_string(format!(".mygit/objects/{}", current_commit_hash)).unwrap();
+    println!("current commit hash {:?}", current_commit_hash);
+    
+    // Check if there's a commit to compare
+    if current_commit_hash.is_empty() {
+        println!("No commits to compare");
+        return;
+    }
+    
+    let current_commit_data = fs::read_to_string(format!(".snap/objects/{}", current_commit_hash)).unwrap();
     let current_commit: Commit = serde_json::from_str(&current_commit_data).unwrap();
     let tree_hash_current = current_commit.tree_hash;
     
-    let parent_commit_data = fs::read_to_string(format!(".mygit/objects/{}", current_commit.parent)).unwrap();
+    // Check if there's a parent commit
+    if current_commit.parent.is_empty() {
+        println!("No parent commit to compare with");
+        return;
+    }
+    
+    let parent_commit_data = fs::read_to_string(format!(".snap/objects/{}", current_commit.parent)).unwrap();
     let parent_commit: Commit = serde_json::from_str(&parent_commit_data).unwrap();
     let tree_hash_parent = parent_commit.tree_hash;
     diff_fn(tree_hash_current, tree_hash_parent);
