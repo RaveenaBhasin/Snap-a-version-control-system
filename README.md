@@ -7,3 +7,7 @@ for each file create
 create commit with file -> blob_hash
 
 save commit
+
+
+In current structure the one without trees there is no directory structure
+Commits store everything in flat format. out of 10 files even if one is changed it will create a new commit with 10 file mappings
