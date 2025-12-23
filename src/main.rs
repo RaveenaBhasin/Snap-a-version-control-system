@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env::current_exe, fs::{self, File}, hash::Hash, path, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
 use sha256::digest;
 use serde::{Deserialize, Serialize};
 
@@ -214,29 +214,80 @@ fn compare_trees_recursive(tree_hash_1: String, tree_hash_2: String, path_prefix
 }
 
 
-fn main() {
+fn cmd_init() {
     fs::create_dir_all(".snap/objects").unwrap();
     if !fs::metadata(".snap/HEAD").is_ok() {
         fs::write(".snap/HEAD", "").unwrap();
     }
+    println!("Initialized empty repository");
+}
+
+fn cmd_add(directory: &str) {
+    fs::create_dir_all(".snap/objects").unwrap();
     
-    let tree = build_tree("test_project");
+    let mut staged_files: HashMap<String, String> = match fs::read_to_string(".snap/INDEX") {
+        Ok(data) => serde_json::from_str(&data).unwrap_or(HashMap::new()),
+        Err(_) => HashMap::new(),
+    };
+    
+    read_directory_and_stage(directory, &mut staged_files);
+    
+    // Save updated staging area
+    let json = serde_json::to_string(&staged_files).unwrap();
+    fs::write(".snap/INDEX", json).unwrap();
+    
+    println!("Added files from {} to staging area", directory);
+}
+
+fn read_directory_and_stage(dir: &str, staged_files: &mut HashMap<String, String>) {
+    for entry in fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        
+        if path.to_str().unwrap().contains(".snap") {
+            continue;
+        }
+        
+        if path.is_file() {
+            let content = fs::read_to_string(&path).unwrap();
+            let blob_hash = save_blob(content);  // Save blob to objects/
+            let file_path = path.to_str().unwrap().to_string();
+            staged_files.insert(file_path, blob_hash);
+        } else if path.is_dir() {
+            read_directory_and_stage(path.to_str().unwrap(), staged_files);
+        }
+    }
+}
+
+fn cmd_commit(message: &str) {
+    let staged_data = fs::read_to_string(".snap/INDEX").unwrap();
+    let staged_files: HashMap<String, String> = serde_json::from_str(&staged_data).unwrap();
+    
+    let tree = Tree {
+        entries: staged_files.into_iter().map(|(name, blob_hash)| {
+            TreeEntry::File { name, blob_hash }
+        }).collect()
+    };
+    
+    let tree_hash = save_tree(tree);
     
     let commit = Commit {
-        tree_hash: tree,
+        tree_hash: tree_hash,
         parent: get_last_commit(),
         timestamp: SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64,
-        message: "test 2 changed".to_string() 
+        message: message.to_string() 
     };
     
     save_commit(commit);
     
-    // println!("\n--- Commit History ---");
-    // log();
+    // Clear staging area after commit
+    fs::write(".snap/INDEX", "{}").unwrap();
+    
+    println!("Commit created: {}", message);
+}
 
-
+fn cmd_diff() {
     let current_commit_hash = get_last_commit();
-    println!("current commit hash {:?}", current_commit_hash);
     
     // Check if there's a commit to compare
     if current_commit_hash.is_empty() {
@@ -257,6 +308,38 @@ fn main() {
     let parent_commit_data = fs::read_to_string(format!(".snap/objects/{}", current_commit.parent)).unwrap();
     let parent_commit: Commit = serde_json::from_str(&parent_commit_data).unwrap();
     let tree_hash_parent = parent_commit.tree_hash;
-    diff_fn(tree_hash_current, tree_hash_parent);
+    diff_fn(tree_hash_parent, tree_hash_current);
+}
 
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    
+    if args.len() < 2 {
+        println!("Usage: {} <command> [args]", args[0]);
+        println!("Commands: init, add <directory>, commit <message>, diff");
+        return;
+    }
+    
+    match args[1].as_str() {
+        "init" => cmd_init(),
+        "add" => {
+            if args.len() < 3 {
+                println!("Usage: {} add <directory>", args[0]);
+                return;
+            }
+            cmd_add(&args[2]);
+        }
+        "commit" => {
+            if args.len() < 3 {
+                println!("Usage: {} commit <message>", args[0]);
+                return;
+            }
+            cmd_commit(&args[2]);
+        }
+        "diff" => cmd_diff(),
+        _ => {
+            println!("Unknown command: {}", args[1]);
+            println!("Commands: init, add <directory>, commit <message>, diff");
+        }
+    }
 }

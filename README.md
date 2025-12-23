@@ -11,3 +11,11 @@ save commit
 
 In current structure the one without trees there is no directory structure
 Commits store everything in flat format. out of 10 files even if one is changed it will create a new commit with 10 file mappings
+
+
+add commands
+stores blob hashes in .snap/objects/
+Updates index with filename → blob_hash mappings
+doesn't create commit
+
+commit should pick staged files from index
