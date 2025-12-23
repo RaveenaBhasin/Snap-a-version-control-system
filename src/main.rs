@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::Path, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, fs, time::{SystemTime, UNIX_EPOCH}};
 use sha256::digest;
 use serde::{Deserialize, Serialize};
 
@@ -311,15 +311,110 @@ fn cmd_diff() {
     diff_fn(tree_hash_parent, tree_hash_current);
 }
 
+fn scan_working_directory(dir: &str, files: &mut HashMap<String, String>, skip_snap: bool) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let path_str = path.to_str().unwrap();
+
+        if skip_snap && path_str.contains(".snap") {
+            continue;
+        }
+
+        if path.is_file() {
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let blob_hash = digest(&content);
+            // Normalize path by removing leading ./
+            let normalized_path = path_str.strip_prefix("./").unwrap_or(path_str);
+            files.insert(normalized_path.to_string(), blob_hash);
+        } else if path.is_dir() {
+            scan_working_directory(path_str, files, skip_snap);
+        }
+    }
+}
+
+fn cmd_status(directory: &str) {
+    // Read staged files 
+    let staged_files: HashMap<String, String> = match fs::read_to_string(".snap/INDEX") {
+        Ok(data) => serde_json::from_str(&data).unwrap_or(HashMap::new()),
+        Err(_) => HashMap::new(),
+    };
+
+    let mut working_files: HashMap<String, String> = HashMap::new();
+    scan_working_directory(directory, &mut working_files, true);
+
+    println!("On branch main\n");
+
+    // changes to be committed
+    let mut has_staged = false;
+    for (file_path, _staged_hash) in &staged_files {
+        if !has_staged {
+            println!("Changes to be committed:");
+            has_staged = true;
+        }
+        println!("  \x1b[32mnew file:   {}\x1b[0m", file_path);
+    }
+    if has_staged {
+        println!();
+    }
+
+    // Show modified files changes not staged for commit
+    let mut has_modified = false;
+    for (file_path, working_hash) in &working_files {
+        if let Some(staged_hash) = staged_files.get(file_path) {
+            if working_hash != staged_hash {
+                if !has_modified {
+                    println!("Changes not staged for commit:");
+                    has_modified = true;
+                }
+                println!("  \x1b[31mmodified:   {}\x1b[0m", file_path);
+            }
+        }
+    }
+    if has_modified {
+        println!();
+    }
+
+    // Show untracked files
+    let mut has_untracked = false;
+    for (file_path, _) in &working_files {
+        if !staged_files.contains_key(file_path) {
+            if !has_untracked {
+                println!("Untracked files:");
+                has_untracked = true;
+            }
+            println!("  \x1b[31m{}\x1b[0m", file_path);
+        }
+    }
+    if has_untracked {
+        println!();
+    }
+
+    if !has_staged && !has_modified && !has_untracked {
+        println!("nothing to commit, working tree clean");
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     
     if args.len() < 2 {
         println!("Usage: {} <command> [args]", args[0]);
-        println!("Commands: init, add <directory>, commit <message>, diff");
+        println!("Commands: init, add <directory>, commit <message>, diff, status");
         return;
     }
-    
+
     match args[1].as_str() {
         "init" => cmd_init(),
         "add" => {
@@ -337,9 +432,16 @@ fn main() {
             cmd_commit(&args[2]);
         }
         "diff" => cmd_diff(),
+        "status" => {
+            if args.len() < 3 {
+                println!("Usage: {} status <directory>", args[0]);
+                return;
+            }
+            cmd_status(&args[2]);
+        }
         _ => {
             println!("Unknown command: {}", args[1]);
-            println!("Commands: init, add <directory>, commit <message>, diff");
+            println!("Commands: init, add <directory>, commit <message>, diff, status");
         }
     }
 }
