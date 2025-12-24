@@ -1,21 +1,36 @@
-Read file contents in a directory
+# Snap a version control system 
 
-for each file create
-    - hash its contents
-    - create blob of each file (creating blob which has just the contents without the file name helps prevent de duplication of the same content)
+## Commands
 
-create commit with file -> blob_hash
+```bash
+# Initialize repository
+cargo run -- init
 
-save commit
+# Stage files from directory
+cargo run -- add <directory>
 
+# Create commit
+cargo run -- commit <message>
 
-In current structure the one without trees there is no directory structure
-Commits store everything in flat format. out of 10 files even if one is changed it will create a new commit with 10 file mappings
+# Show differences between commits
+cargo run -- diff
 
+# Show repository status
+cargo run -- status <directory>
 
-add commands
-stores blob hashes in .snap/objects/
-Updates index with filename → blob_hash mappings
-doesn't create commit
+# View commit history
+cargo run -- log
+cargo run -- log --all
 
-commit should pick staged files from index
+# Rollback to a specific commit
+cargo run -- rollback <commit_hash> <directory>
+
+# List branches
+cargo run -- branch
+
+# Create new branch
+cargo run -- checkout <branch_name>
+
+# Switch to branch
+cargo run -- switch <branch_name> <directory>
+```
