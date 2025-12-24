@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, fmt::format, fs, time::{SystemTime, UNIX_EPOCH}};
 use sha256::digest;
 use serde::{Deserialize, Serialize};
 
@@ -36,9 +36,21 @@ fn save_tree(tree: Tree) -> String {
 
 fn save_commit(commit: Commit) {
     let json = serde_json::to_string(&commit).unwrap();
-    let commit_hash = digest(&json); 
+    let commit_hash = digest(&json);
     fs::write(format!(".snap/objects/{}", &commit_hash), json).unwrap();
-    fs::write(".snap/HEAD", &commit_hash).unwrap();
+
+    // Update branch ref if HEAD is pointing to a branch, otherwise update HEAD directly
+    let head_content = fs::read_to_string(".snap/HEAD").unwrap();
+    let head_content = head_content.trim();
+
+    if head_content.starts_with("ref: ") {
+        // HEAD is pointing to a branch, update the branch ref
+        let branch_path = head_content.strip_prefix("ref: ").unwrap();
+        fs::write(format!(".snap/{}", branch_path), &commit_hash).unwrap();
+    } else {
+        // HEAD is detached (pointing directly to a commit), update HEAD
+        fs::write(".snap/HEAD", &commit_hash).unwrap();
+    }
 }
 
 fn build_tree(dir: &str) -> String {
@@ -66,7 +78,17 @@ fn build_tree(dir: &str) -> String {
 
 fn get_last_commit() -> String {
     let head = fs::read_to_string(".snap/HEAD").unwrap();
-    return head.trim().to_string();
+    let head = head.trim();
+
+    // Check if HEAD is a symbolic ref (pointing to a branch)
+    if head.starts_with("ref: ") {
+        let branch_path = head.strip_prefix("ref: ").unwrap();
+        if let Ok(commit_hash) = fs::read_to_string(format!(".snap/{}", branch_path)) {
+            return commit_hash.trim().to_string();
+        }
+    }
+
+    return head.to_string();
 }
 
 // fn log() {
@@ -115,6 +137,53 @@ fn diff_fn(tree_hash_1: String, tree_hash_2: String) {
 
 fn compare_trees(tree_hash_1: String, tree_hash_2: String) {
     compare_trees_recursive(tree_hash_1, tree_hash_2, "");
+}
+
+fn show_file_diff(old_hash: &str, new_hash: &str, file_path: &str) {
+    let old_content = match fs::read_to_string(format!(".snap/objects/{}", old_hash)) {
+        Ok(content) => content,
+        Err(_) => {
+            println!("  Error: Could not read old version");
+            return;
+        }
+    };
+
+    let new_content = match fs::read_to_string(format!(".snap/objects/{}", new_hash)) {
+        Ok(content) => content,
+        Err(_) => {
+            println!("  Error: Could not read new version");
+            return;
+        }
+    };
+
+    let old_lines: Vec<&str> = old_content.lines().collect();
+    let new_lines: Vec<&str> = new_content.lines().collect();
+
+    println!("  --- old/{}", file_path);
+    println!("  +++ new/{}", file_path);
+
+    let mut i = 0;
+    let mut j = 0;
+
+    while i < old_lines.len() || j < new_lines.len() {
+        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+            // Lines are the same
+            println!("   {}", old_lines[i]);
+            i += 1;
+            j += 1;
+        } else if i < old_lines.len() && (j >= new_lines.len() || !new_lines[j..].contains(&old_lines[i])) {
+            // Line was removed
+            println!("  \x1b[31m - {}\x1b[0m", old_lines[i]);
+            i += 1;
+        } else if j < new_lines.len() {
+            // Line was added
+            println!("  \x1b[32m + {}\x1b[0m", new_lines[j]);
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    println!();
 }
 
 fn compare_trees_recursive(tree_hash_1: String, tree_hash_2: String, path_prefix: &str) {
@@ -196,7 +265,8 @@ fn compare_trees_recursive(tree_hash_1: String, tree_hash_2: String, path_prefix
                 match (entry1, entry2) {
                     // Both are files - file was modified
                     (TreeEntry::File { .. }, TreeEntry::File { .. }) => {
-                        println!("Modified: {} hash changed from {:?} to {:?}", full_path(name2), hash1, hash2);
+                        println!("Modified: {}", full_path(name2));
+                        show_file_diff(hash1, hash2, &full_path(name2));
                     }
                     // Both are directories - recursively compare them
                     (TreeEntry::Directory { .. }, TreeEntry::Directory { .. }) => {
@@ -216,8 +286,9 @@ fn compare_trees_recursive(tree_hash_1: String, tree_hash_2: String, path_prefix
 
 fn cmd_init() {
     fs::create_dir_all(".snap/objects").unwrap();
+    fs::create_dir_all(".snap/refs/heads").unwrap();
     if !fs::metadata(".snap/HEAD").is_ok() {
-        fs::write(".snap/HEAD", "").unwrap();
+        fs::write(".snap/HEAD", "ref: refs/heads/main").unwrap();
     }
     println!("Initialized empty repository");
 }
@@ -414,7 +485,7 @@ fn cmd_log() {
         return;
     }
 
-    println!("Commit history:\n");
+    println!("Commit history (from current HEAD):\n");
 
     while !current.is_empty() {
         let commit_hash = current.clone();
@@ -427,12 +498,50 @@ fn cmd_log() {
             Err(_) => break,
         };
 
-        println!("commit {}", commit_hash);
+        let is_head = commit_hash == get_last_commit();
+        let marker = if is_head { " (HEAD)" } else { "" };
+
+        println!("commit {}{}", commit_hash, marker);
         println!("Message: {}", commit.message);
         println!("Timestamp: {}", commit.timestamp);
         println!();
 
         current = commit.parent;
+    }
+}
+
+fn cmd_log_all() {
+    println!("All commits in repository:\n");
+
+    let mut commits = Vec::new();
+
+    // Read all objects and filter for commits
+    if let Ok(entries) = fs::read_dir(".snap/objects") {
+        for entry in entries {
+            if let Ok(entry) = entry {
+                let hash = entry.file_name().to_string_lossy().to_string();
+                if let Ok(data) = fs::read_to_string(format!(".snap/objects/{}", hash)) {
+                    if let Ok(commit) = serde_json::from_str::<Commit>(&data) {
+                        commits.push((hash, commit));
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by timestamp (newest first)
+    commits.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+
+    let current_head = get_last_commit();
+
+    for (hash, commit) in commits {
+        let is_head = hash == current_head;
+        let marker = if is_head { " (HEAD)" } else { "" };
+
+        println!("commit {}{}", hash, marker);
+        println!("Message: {}", commit.message);
+        println!("Timestamp: {}", commit.timestamp);
+        println!();
     }
 }
 
@@ -588,6 +697,84 @@ fn cmd_rollback(commit_hash: &str, directory: &str) {
     println!("\nRollback complete! HEAD is now at {}", &commit_hash[..12]);
 }
 
+fn create_branch(branch_name: String) {
+    let latest_commit = get_last_commit();
+    if fs::exists(format!(".snap/refs/heads/{}", branch_name)).unwrap(){
+        println!("Branch already exists");
+        return;
+    }
+    fs::write(format!(".snap/refs/heads/{}", branch_name), &latest_commit).unwrap();
+    println!("Branch {} created at commit {}", branch_name, &latest_commit[..12]);
+}
+
+fn switch_branch(branch_name: String, directory: &str) {
+    let commit_hash = fs::read_to_string(format!(".snap/refs/heads/{}", branch_name)).unwrap();
+    let commit_data = fs::read_to_string(format!(".snap/objects/{}", commit_hash)).unwrap();
+    let commit: Commit = serde_json::from_str(&commit_data).unwrap();
+
+    clear_working_directory(directory);
+
+    restore_tree(&commit.tree_hash, "");
+
+    fs::write(".snap/HEAD", format!("ref: refs/heads/{}", branch_name)).unwrap();
+
+    println!("Switched to branch '{}'", branch_name);
+    println!("HEAD is now at {}", &commit_hash[..12]);
+}
+
+fn list_branches() {
+    let head_content = fs::read_to_string(".snap/HEAD").unwrap_or_default();
+    let current_branch = if head_content.starts_with("ref: refs/heads/") {
+        head_content.trim().strip_prefix("ref: refs/heads/").unwrap_or("")
+    } else {
+        ""
+    };
+
+    println!("Branches:");
+
+    if let Ok(heads_dir) = fs::read_dir(".snap/refs/heads") {
+        let mut found_branches = false;
+        for entry in heads_dir {
+            if let Ok(entry) = entry {
+                let branch_name = entry.file_name().to_str().unwrap().to_string();
+                let marker = if branch_name == current_branch { " *" } else { "  " };
+                println!("{} {}", marker, branch_name);
+                found_branches = true;
+            }
+        }
+        if !found_branches {
+            println!("  (no branches yet - create one with 'branch <name>')");
+        }
+    }
+}
+
+fn clear_working_directory(dir: &str) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let path_str = path.to_str().unwrap();
+
+        if path_str.contains(".snap") {
+            continue;
+        }
+
+        if path.is_file() {
+            fs::remove_file(path).ok();
+        } else if path.is_dir() {
+            clear_working_directory(path_str);
+            fs::remove_dir(path).ok(); // Remove empty directory
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     
@@ -621,7 +808,13 @@ fn main() {
             }
             cmd_status(&args[2]);
         }
-        "log" => cmd_log(),
+        "log" => {
+            if args.len() > 2 && args[2] == "--all" {
+                cmd_log_all();
+            } else {
+                cmd_log();
+            }
+        }
         "rollback" => {
             if args.len() < 4 {
                 println!("Usage: {} rollback <commit_hash> <directory>", args[0]);
@@ -630,9 +823,23 @@ fn main() {
             }
             cmd_rollback(&args[2], &args[3]);
         }
+        "branch" => {
+            list_branches();
+        }
+        "checkout" => {
+            create_branch(args[2].clone());
+        }
+        "switch" => {
+            if args.len() < 4 {
+                println!("Usage: {} switch <branch_name> <directory>", args[0]);
+                println!("Example: {} switch feature-x test_project", args[0]);
+                return;
+            }
+            switch_branch(args[2].clone(), &args[3]);
+        }
         _ => {
             println!("Unknown command: {}", args[1]);
-            println!("Commands: init, add <directory>, commit <message>, diff, status, log, rollback <commit_hash> <directory>");
+            println!("Commands: init, add <directory>, commit <message>, diff, status, log, rollback <commit_hash> <directory>, branch [name], switch <branch> <directory>");
         }
     }
 }
