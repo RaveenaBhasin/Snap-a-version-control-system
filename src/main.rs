@@ -345,7 +345,7 @@ fn scan_working_directory(dir: &str, files: &mut HashMap<String, String>, skip_s
 }
 
 fn cmd_status(directory: &str) {
-    // Read staged files 
+    // Read staged files
     let staged_files: HashMap<String, String> = match fs::read_to_string(".snap/INDEX") {
         Ok(data) => serde_json::from_str(&data).unwrap_or(HashMap::new()),
         Err(_) => HashMap::new(),
@@ -406,6 +406,188 @@ fn cmd_status(directory: &str) {
     }
 }
 
+fn cmd_log() {
+    let mut current = get_last_commit();
+
+    if current.is_empty() {
+        println!("No commits yet");
+        return;
+    }
+
+    println!("Commit history:\n");
+
+    while !current.is_empty() {
+        let commit_hash = current.clone();
+        let commit_data = match fs::read_to_string(format!(".snap/objects/{}", commit_hash)) {
+            Ok(data) => data,
+            Err(_) => break,
+        };
+        let commit: Commit = match serde_json::from_str(&commit_data) {
+            Ok(commit) => commit,
+            Err(_) => break,
+        };
+
+        println!("commit {}", commit_hash);
+        println!("Message: {}", commit.message);
+        println!("Timestamp: {}", commit.timestamp);
+        println!();
+
+        current = commit.parent;
+    }
+}
+
+fn collect_tree_files(tree_hash: &str, base_path: &str, files: &mut std::collections::HashSet<String>) {
+    let tree_data = match fs::read_to_string(format!(".snap/objects/{}", tree_hash)) {
+        Ok(data) => data,
+        Err(_) => return,
+    };
+    let tree: Tree = match serde_json::from_str(&tree_data) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    for entry in tree.entries {
+        match entry {
+            TreeEntry::File { name, blob_hash: _ } => {
+                let file_path = if base_path.is_empty() {
+                    name
+                } else {
+                    format!("{}/{}", base_path, name)
+                };
+                files.insert(file_path);
+            }
+            TreeEntry::Directory { name, tree_hash } => {
+                let dir_path = if base_path.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{}/{}", base_path, name)
+                };
+                collect_tree_files(&tree_hash, &dir_path, files);
+            }
+        }
+    }
+}
+
+fn collect_work_directory_files(dir: &str, files: &mut std::collections::HashSet<String>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let path_str = path.to_str().unwrap();
+
+        if path_str.contains(".snap") {
+            continue;
+        }
+
+        if path.is_file() {
+            files.insert(path_str.to_string());
+        } else if path.is_dir() {
+            collect_work_directory_files(path_str, files);
+        }
+    }
+}
+
+fn restore_tree(tree_hash: &str, base_path: &str) {
+    let tree_data = fs::read_to_string(format!(".snap/objects/{}", tree_hash)).unwrap();
+    let tree: Tree = serde_json::from_str(&tree_data).unwrap();
+
+    for entry in tree.entries {
+        match entry {
+            TreeEntry::File { name, blob_hash } => {
+                // Read blob content
+                let content = fs::read_to_string(format!(".snap/objects/{}", blob_hash)).unwrap();
+
+                // Construct full path
+                let file_path = if base_path.is_empty() {
+                    name
+                } else {
+                    format!("{}/{}", base_path, name)
+                };
+
+                // Create parent directories if needed
+                if let Some(parent) = std::path::Path::new(&file_path).parent() {
+                    fs::create_dir_all(parent).ok();
+                }
+
+                // Write file to disk
+                fs::write(&file_path, content).unwrap();
+                println!("Restored: {}", file_path);
+            }
+            TreeEntry::Directory { name, tree_hash } => {
+                // Construct subdirectory path
+                let dir_path = if base_path.is_empty() {
+                    name
+                } else {
+                    format!("{}/{}", base_path, name)
+                };
+
+                // Create directory
+                fs::create_dir_all(&dir_path).ok();
+
+                // Recursively restore subdirectory
+                restore_tree(&tree_hash, &dir_path);
+            }
+        }
+    }
+}
+
+fn cmd_rollback(commit_hash: &str, directory: &str) {
+    let commit_data = match fs::read_to_string(format!(".snap/objects/{}", commit_hash)) {
+        Ok(data) => data,
+        Err(_) => {
+            println!("Error: Commit {} not found", commit_hash);
+            return;
+        }
+    };
+    let commit: Commit = match serde_json::from_str(&commit_data) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("Error: Invalid commit data");
+            return;
+        }
+    };
+
+    println!("Rolling back to commit: {}", commit.message);
+    println!("This will affect files in: {}\n", directory);
+
+    // files existing in target commit
+    let mut target_files = std::collections::HashSet::new();
+    collect_tree_files(&commit.tree_hash, "", &mut target_files);
+
+    // current files in the directory
+    let mut current_files = std::collections::HashSet::new();
+    collect_work_directory_files(directory, &mut current_files);
+
+    // Delete files that exist currently but not in target commit
+    for file in &current_files {
+        // Extract the relative path within the directory
+        let relative_path = file.strip_prefix(&format!("{}/", directory))
+            .or_else(|| file.strip_prefix(directory))
+            .unwrap_or(file);
+
+        if !target_files.contains(relative_path) {
+            match fs::remove_file(file) {
+                Ok(_) => println!("Deleted: {}", file),
+                Err(e) => println!("Warning: Failed to delete {}: {}", file, e),
+            }
+        }
+    }
+
+    // Restore all files from target commit
+    restore_tree(&commit.tree_hash, "");
+
+    fs::write(".snap/HEAD", commit_hash).unwrap();
+
+    println!("\nRollback complete! HEAD is now at {}", &commit_hash[..12]);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     
@@ -439,9 +621,18 @@ fn main() {
             }
             cmd_status(&args[2]);
         }
+        "log" => cmd_log(),
+        "rollback" => {
+            if args.len() < 4 {
+                println!("Usage: {} rollback <commit_hash> <directory>", args[0]);
+                println!("Example: {} rollback abc123... test_project", args[0]);
+                return;
+            }
+            cmd_rollback(&args[2], &args[3]);
+        }
         _ => {
             println!("Unknown command: {}", args[1]);
-            println!("Commands: init, add <directory>, commit <message>, diff, status");
+            println!("Commands: init, add <directory>, commit <message>, diff, status, log, rollback <commit_hash> <directory>");
         }
     }
 }
